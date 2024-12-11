@@ -51,6 +51,7 @@
 #include <inttypes.h>
 #include <WalterModem.h>
 #include <DecibelMeter.hpp>
+#include <Adafruit_SSD1306.h>
 
 /**
  * @brief The address of the server to upload the data to. 
@@ -78,6 +79,46 @@
 #define RADIO_TECHNOLOGY WALTER_MODEM_RAT_LTEM
 
 /**
+ * @brief I/O pin used for I2C SDA with the SPL meter.
+ */
+#define DB_METER_SDA 10
+
+/**
+ * @brief I/O pin used for I2C SCL with the SPL meter.
+ */
+#define DB_METER_SCL 9
+
+/**
+ * @brief The width of the OLED screen in pixels.
+ */
+#define SCREEN_WIDTH 128
+
+/**
+ * @brief The height of the OLED screen in pixels.
+ */
+#define SCREEN_HEIGHT 64
+
+/**
+ * @brief I/O pin used for I2C SDA with the OLED.
+ */
+#define SCREEN_SDA 16
+
+/**
+ * @brief I/O pin used for I2C SCL with the OLED.
+ */
+#define SCREEN_SCL 17
+
+/**
+ * @brief I/O pin used for the OLED reset line, -1 means not connected.
+ */
+#define SCREEN_RESET -1
+
+/**
+ * @brief The I2C address of the OLED screen.
+ */
+#define SCREEN_ADDRESS 0x3C
+
+/**
  * @brief The modem instance.
  */
 WalterModem modem;
@@ -85,7 +126,17 @@ WalterModem modem;
 /**
  * @brief The decibel meter instance.
  */
-DecibelMeter dbmeter(10, 9, 10000);
+DecibelMeter dbmeter(DB_METER_SDA, DB_METER_SCL, 10000);
+
+/**
+ * @brief The I2C peripheral used for the screen.
+ */
+//TwoWire I2C1 = TwoWire(1);
+
+/**
+ * @brief The OLED screen instance.
+ */
+Adafruit_SSD1306 screen(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire1, SCREEN_RESET);
 
 /**
  * @brief The buffer to transmit to the UDP server. The first 6 bytes will be
@@ -166,6 +217,46 @@ bool socketConnect(const char *ip, uint16_t port)
 }
 
 /**
+ * @brief Display a status on the screen.
+ * 
+ * @param status A constant string representing the status of the SPL meter.
+ * 
+ * @return None.
+ */
+void displayStatus(const char *status)
+{
+  screen.setTextColor(SSD1306_WHITE);
+  screen.clearDisplay();
+  screen.setCursor(0, 0);
+  screen.setTextSize(1);
+  screen.print(status);
+  screen.display();
+}
+
+/**
+ * @brief Display SPL measurements on the screen.
+ * 
+ * @param db The current sound pressure level.
+ * @param dbmin The minimum sound pressure level.
+ * @param dbmax The maximum sound pressure level.
+ * 
+ * @return None.
+ */
+void displaySPL(uint8_t db, uint8_t dbmin, uint8_t dbmax)
+{
+  screen.setTextColor(SSD1306_WHITE);
+  screen.clearDisplay();
+  screen.setTextSize(2);
+  screen.setCursor(0, 0);
+  screen.printf("Avg: %ddB", db);
+  screen.setCursor(0, 25);
+  screen.printf("Min: %ddB", dbmin);
+  screen.setCursor(0, 50);
+  screen.printf("Max: %ddB", dbmax);
+  screen.display();
+}
+
+/**
  * @brief Set up the system.
  * 
  * This function will set up the system and initialize the modem.
@@ -177,12 +268,27 @@ void setup()
   Serial.begin(115200);
   delay(5000);
 
-  Serial.print("Sound Pressure Level sensor v0.0.1\r\n");
+  Serial.print("Sound Pressure Level sensor v0.0.2\r\n");
 
-  /* Power and initialize the decibel meter */
+  /* We use IO8 as ground and IO18 as power for the decibel meter */
+  pinMode(8, OUTPUT);
+  pinMode(18, OUTPUT);
+  digitalWrite(8, LOW);
+  digitalWrite(18, HIGH);
+
+  /* Switch on the 3V3 output and initialize the SSD1306 OLED screen */
   pinMode(0, OUTPUT);
   digitalWrite(0, LOW);
   delay(50);
+
+  Wire1.begin(SCREEN_SDA, SCREEN_SCL, 400000);
+  while(!screen.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println("SSD1306 allocation failed");
+    delay(1000);
+  }
+
+  displayStatus("Booting SPL v0.0.2");
+  delay(1000);
 
   dbmeter.begin();
   Serial.printf("Decibel meter version: 0x%02X\n", dbmeter.getVersion());
@@ -202,6 +308,7 @@ void setup()
     dataBuf[5]);
 
   /* Modem initialization */
+  displayStatus("Starting modem...");
   if(modem.begin(&ModemSerial)) {
     Serial.print("Modem initialization OK\r\n");
   } else {
@@ -229,6 +336,7 @@ void setup()
   }
 
   /* Connect to the network */
+  displayStatus("Connecting...");
   if(!lteConnect()) {
     Serial.print("Could not connect to the LTE network\r\n");
     delay(1000);
@@ -247,6 +355,8 @@ void loop()
   uint8_t dbmax = dbmeter.readMaxDecibel();
   Serial.printf("dB = %03d [MIN: %03d, MAX: %03d]\n", db, dbmin, dbmax);
 
+  displayStatus("Transmitting...");
+
   /* Reset the min/max registers */
   dbmeter.resetMinMax();
 
@@ -256,30 +366,30 @@ void loop()
   dataBuf[8] = dbmax;
 
 
-    if(!modem.getCellInformation(WALTER_MODEM_SQNMONI_REPORTS_SERVING_CELL, &rsp)) {
-      Serial.println("Could not request cell information");
-    } else {
-      Serial.printf("Connected on band %u using operator %s (%u%02u)",
-        rsp.data.cellInformation.band, rsp.data.cellInformation.netName,
-        rsp.data.cellInformation.cc, rsp.data.cellInformation.nc);
-      Serial.printf(" and cell ID %u.\r\n",
-        rsp.data.cellInformation.cid);
-      Serial.printf("Signal strength: RSRP: %.2f, RSRQ: %.2f.\r\n",
-        rsp.data.cellInformation.rsrp, rsp.data.cellInformation.rsrq);
+  if(!modem.getCellInformation(WALTER_MODEM_SQNMONI_REPORTS_SERVING_CELL, &rsp)) {
+    Serial.println("Could not request cell information");
+  } else {
+    Serial.printf("Connected on band %u using operator %s (%u%02u)",
+      rsp.data.cellInformation.band, rsp.data.cellInformation.netName,
+      rsp.data.cellInformation.cc, rsp.data.cellInformation.nc);
+    Serial.printf(" and cell ID %u.\r\n",
+      rsp.data.cellInformation.cid);
+    Serial.printf("Signal strength: RSRP: %.2f, RSRQ: %.2f.\r\n",
+      rsp.data.cellInformation.rsrp, rsp.data.cellInformation.rsrq);
 
-      /* Add monitor data to packet */
-      dataBuf[9] = rsp.data.cellInformation.cc >> 8;
-      dataBuf[10] = rsp.data.cellInformation.cc & 0xFF;
-      dataBuf[11] = rsp.data.cellInformation.nc >> 8;
-      dataBuf[12] = rsp.data.cellInformation.nc & 0xFF;
-      dataBuf[13] = rsp.data.cellInformation.tac >> 8;
-      dataBuf[14] = rsp.data.cellInformation.tac & 0xFF;
-      dataBuf[15] = (rsp.data.cellInformation.cid >> 24) & 0xFF;
-      dataBuf[16] = (rsp.data.cellInformation.cid >> 16) & 0xFF;
-      dataBuf[17] = (rsp.data.cellInformation.cid >> 8) & 0xFF;
-      dataBuf[18] = rsp.data.cellInformation.cid & 0xFF;
-      dataBuf[19] = (uint8_t) (rsp.data.cellInformation.rsrp * -1);
-    }
+    /* Add monitor data to packet */
+    dataBuf[9] = rsp.data.cellInformation.cc >> 8;
+    dataBuf[10] = rsp.data.cellInformation.cc & 0xFF;
+    dataBuf[11] = rsp.data.cellInformation.nc >> 8;
+    dataBuf[12] = rsp.data.cellInformation.nc & 0xFF;
+    dataBuf[13] = rsp.data.cellInformation.tac >> 8;
+    dataBuf[14] = rsp.data.cellInformation.tac & 0xFF;
+    dataBuf[15] = (rsp.data.cellInformation.cid >> 24) & 0xFF;
+    dataBuf[16] = (rsp.data.cellInformation.cid >> 16) & 0xFF;
+    dataBuf[17] = (rsp.data.cellInformation.cid >> 8) & 0xFF;
+    dataBuf[18] = rsp.data.cellInformation.cid & 0xFF;
+    dataBuf[19] = (uint8_t) (rsp.data.cellInformation.rsrp * -1);
+  }
 
   if(!socketConnect(SERV_ADDR, SERV_PORT)) {
     Serial.print("Could not connect to UDP server socket\r\n");
@@ -329,6 +439,8 @@ void loop()
     ESP.restart();
     return;
   }
+
+  displaySPL(db, dbmin, dbmax);
 
   /* Light sleep for 60 seconds */
   // esp_sleep_enable_timer_wakeup(60 * 1000000);
