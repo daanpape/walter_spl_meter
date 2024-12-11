@@ -9,3 +9,5 @@ https://pcbartists.com/product-documentation/decibel-meter-module-interfacing-gu
 The sketch uploads the A-weighted (dbA) sound pressure level and the minimum
 and maximum values every minute. The minimum and maximum is reset after every
 transmission. The data is uploaded to https://walterdemo.quickspot.io
+
+![Picture of the test setup](./meter_test_setup.jpg)
